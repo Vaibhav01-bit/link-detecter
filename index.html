@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PhishGuard - Advanced Phishing Detection System</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🛡️ PhishGuard</h1>
+            <p>Advanced Ensemble Machine Learning Phishing Detection System</p>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-number" id="totalScans">0</div>
+                <div class="stat-label">Total Scans</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="phishingDetected">0</div>
+                <div class="stat-label">Phishing Detected</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">97.33%</div>
+                <div class="stat-label">Accuracy Rate</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">3</div>
+                <div class="stat-label">ML Models</div>
+            </div>
+        </div>
+
+        <div class="main-card">
+            <div class="input-section">
+                <h2>🔍 URL Scanner</h2>
+                <p style="margin-bottom: 20px; color: #6c757d;">Enter a URL to analyze for potential phishing threats using our ensemble machine learning models</p>
+                
+                <div class="input-group">
+                    <input type="url" class="url-input" id="urlInput" placeholder="https://example.com" />
+                    <button class="scan-btn" id="scanBtn" onclick="scanURL()">
+                        <span id="scanBtnText">🔍 Scan URL</span>
+                    </button>
+                </div>
+            </div>
+
+            <div class="results-section" id="resultsSection">
+                <!-- Results will be inserted here -->
+            </div>
+        </div>
+
+        <div class="history-section">
+            <h2 class="history-title">📊 Scan History</h2>
+            <div id="historyContainer">
+                <p style="color: #6c757d; text-align: center;">No scans performed yet</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
