@@ -52,7 +52,7 @@ bash
 Copy
 Edit
 python -m http.server 8000
-Then visit: http://localhost:8000
+Then visit: http://127.0.0.1:5500/index.html
 
 📊 How It Works
 User enters a URL.
