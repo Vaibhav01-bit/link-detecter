@@ -1,4 +1,4 @@
-// PhishGuard Frontend Application
+ // PhishGuard Frontend Application
 class PhishingDetector {
   constructor() {
     this.models = {
@@ -19,6 +19,7 @@ class PhishingDetector {
     this.updateStats();
     this.loadHistory();
     this.setupEventListeners();
+    this.loadTheme();
   }
 
   setupEventListeners() {
@@ -32,6 +33,11 @@ class PhishingDetector {
     // Real-time URL validation
     document.getElementById("urlInput").addEventListener("input", (e) => {
       this.validateURL(e.target.value);
+    });
+
+    // Theme toggle
+    document.getElementById("themeToggle").addEventListener("click", () => {
+      this.toggleTheme();
     });
   }
 
@@ -81,6 +87,7 @@ class PhishingDetector {
       // Domain analysis
       features.subdomainCount = (hostname.match(/\./g) || []).length - 1;
       features.domainTokens = hostname.split(".").length;
+      features.hostnameEntropy = this.calculateEntropy(hostname);
 
       // Protocol and security
       features.isHttps = url.startsWith("https://");
@@ -113,6 +120,9 @@ class PhishingDetector {
       features.hasLogin = pathname.includes("login") || pathname.includes("signin");
       features.hasSecure = pathname.includes("secure") || search.has("secure");
 
+      // Hex encoding detection (common in phishing)
+      features.hasHex = /%[0-9A-Fa-f]{2}/.test(url);
+
       // Domain reputation (simulated)
       features.domainAge = Math.floor(Math.random() * 3650); // 0-10 years in days
       features.alexa_rank = Math.floor(Math.random() * 1000000); // Simulated Alexa rank
@@ -128,6 +138,21 @@ class PhishingDetector {
       console.error("Feature extraction error:", error);
       return null;
     }
+  }
+
+  calculateEntropy(text) {
+    if (!text) return 0;
+    let entropy = 0;
+    const length = text.length;
+    const charCount = {};
+    for (let char of text) {
+      charCount[char] = (charCount[char] || 0) + 1;
+    }
+    for (let count of Object.values(charCount)) {
+      const p = count / length;
+      entropy -= p * Math.log2(p);
+    }
+    return entropy;
   }
 
   isPrivateIP(hostname) {
@@ -157,21 +182,22 @@ class PhishingDetector {
       }
 
       const data = await response.json();
-      
-      // Map backend response to frontend expected format
-      const isPhishing = data.phishing;
-      const score = isPhishing ? Math.random() * 0.4 + 0.6 : Math.random() * 0.4;
-      const confidence = Math.random() * 0.2 + 0.8; // Random confidence between 80-100%
-      const modelPredictions = { [data.model]: isPhishing ? score : 1 - score };
-      
+
+      // Use backend's multi-signal scoring
+      const score = data.score;
+      const confidence = data.confidence;
+      const reasonCodes = data.reason_codes || [];
+      const modelPredictions = { [data.model]: score };
+
       return {
         score: score,
         confidence: confidence,
         predictions: modelPredictions,
         features: data.features,
+        reasonCodes: reasonCodes,
         classification: this.classifyResult(score),
         modelDetails: {
-          [data.model]: { name: data.model, weight: 1, accuracy: 1 },
+          [data.model]: { name: data.model, weight: 1, accuracy: 0.95 },
         },
       };
 
@@ -194,6 +220,7 @@ class PhishingDetector {
         confidence: confidence,
         predictions: modelPredictions,
         features: features,
+        reasonCodes: [],
         classification: this.classifyResult(score),
         modelDetails: { "Local Simulation": { name: "Local Simulation", weight: 1, accuracy: 0.95 } },
       };
@@ -203,13 +230,15 @@ class PhishingDetector {
   // A simple heuristic-based scoring function for local simulation
   calculateSuspiciousScore(features) {
       let score = 0;
-      if (!features.isHttps) score += 0.2;
-      if (features.hasIP) score += 0.3;
+      if (!features.isHttps) score += 0.25;
+      if (features.hasIP) score += 0.35;
       if (features.isShortened) score += 0.25;
-      if (features.suspiciousKeywords > 0) score += features.suspiciousKeywords * 0.1;
+      if (features.suspiciousKeywords > 0) score += features.suspiciousKeywords * 0.08;
       if (features.suspiciousTLD) score += 0.15;
       if (features.urlLength > 75) score += 0.1;
       if (features.subdomainCount > 3) score += 0.1;
+      if (features.hasHex) score += 0.2;
+      if (features.hostnameEntropy > 4.5) score += 0.1; // High entropy might indicate obfuscation
       return Math.min(score, 1); // Clamp score at 1
   }
 
@@ -332,6 +361,15 @@ class PhishingDetector {
             `
             )
             .join("")}
+
+          ${result.reasonCodes && result.reasonCodes.length > 0 ? `
+          <div style="margin-top: 20px;">
+            <h4 style="margin-bottom: 15px; color: #495057;">🔍 Detection Reasons</h4>
+            <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+              ${result.reasonCodes.map(code => `<span style="background: rgba(255,255,255,0.5); padding: 4px 8px; border-radius: 12px; font-size: 0.85em; color: #495057;">${code}</span>`).join('')}
+            </div>
+          </div>
+          ` : ''}
         </div>
 
         <div class="features-grid">
@@ -508,6 +546,25 @@ class PhishingDetector {
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
   }
+
+  // Theme management
+  loadTheme() {
+    const savedTheme = localStorage.getItem("theme") || "light";
+    document.body.classList.toggle("dark", savedTheme === "dark");
+    this.updateThemeIcon();
+  }
+
+  toggleTheme() {
+    const isDark = document.body.classList.toggle("dark");
+    localStorage.setItem("theme", isDark ? "dark" : "light");
+    this.updateThemeIcon();
+  }
+
+  updateThemeIcon() {
+    const themeToggle = document.getElementById("themeToggle");
+    const isDark = document.body.classList.contains("dark");
+    themeToggle.textContent = isDark ? "☀️" : "🌙";
+  }
 }
 
 // API Communication Class
@@ -549,31 +606,6 @@ let detector;
 
 document.addEventListener("DOMContentLoaded", () => {
   detector = new PhishingDetector();
-
-  // Add some sample data for demonstration
-  if (detector.scanHistory.length === 0) {
-    const sampleHistory = [
-      {
-        url: "https://secure-paypal-verification.suspicious-domain.com/login",
-        result: { type: "phishing", label: "Phishing Detected", icon: "🚨" },
-        score: 0.89,
-        confidence: 0.94,
-        timestamp: new Date(Date.now() - 3600000).toISOString(),
-      },
-      {
-        url: "https://google.com",
-        result: { type: "safe", label: "Safe Website", icon: "✅" },
-        score: 0.05,
-        confidence: 0.98,
-        timestamp: new Date(Date.now() - 7200000).toISOString(),
-      },
-    ];
-
-    detector.scanHistory = sampleHistory;
-    localStorage.setItem("scanHistory", JSON.stringify(sampleHistory));
-    detector.updateStats();
-    detector.loadHistory();
-  }
 });
 
 // Add CSS animation for toast notification

@@ -5,12 +5,31 @@
     box-sizing: border-box;
 }
 
+:root {
+    --bg-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    --bg-dark: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+    --text-light: #333;
+    --text-dark: #e0e0e0;
+    --card-bg-light: rgba(255, 255, 255, 0.95);
+    --card-bg-dark: rgba(30, 30, 30, 0.95);
+    --border-light: #e1e5e9;
+    --border-dark: #555;
+    --accent: #667eea;
+    --accent-dark: #5a67d8;
+}
+
 body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: var(--bg-gradient);
     min-height: 100vh;
-    color: #333;
+    color: var(--text-light);
     line-height: 1.6;
+    transition: background 0.3s ease, color 0.3s ease;
+}
+
+body.dark {
+    background: var(--bg-dark);
+    color: var(--text-dark);
 }
 
 .container {
@@ -25,6 +44,27 @@ body {
     margin-bottom: 40px;
     color: white;
     animation: fadeInDown 1s ease-out;
+    position: relative;
+}
+
+.theme-toggle {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: rgba(255, 255, 255, 0.2);
+    border: none;
+    border-radius: 50%;
+    width: 50px;
+    height: 50px;
+    font-size: 1.5em;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    backdrop-filter: blur(10px);
+}
+
+.theme-toggle:hover {
+    background: rgba(255, 255, 255, 0.3);
+    transform: scale(1.1);
 }
 
 .header h1 {
@@ -50,13 +90,18 @@ body {
 }
 
 .stat-card {
-    background: rgba(255, 255, 255, 0.95);
+    background: var(--card-bg-light);
     padding: 25px;
     border-radius: 15px;
     text-align: center;
     box-shadow: 0 10px 30px rgba(0,0,0,0.1);
     transition: all 0.3s ease;
     backdrop-filter: blur(10px);
+}
+
+body.dark .stat-card {
+    background: var(--card-bg-dark);
+    color: var(--text-dark);
 }
 
 .stat-card:hover {
@@ -81,13 +126,18 @@ body {
 
 /* Main Card */
 .main-card {
-    background: rgba(255, 255, 255, 0.95);
+    background: var(--card-bg-light);
     border-radius: 20px;
     padding: 40px;
     box-shadow: 0 20px 60px rgba(0,0,0,0.1);
     backdrop-filter: blur(15px);
     margin-bottom: 30px;
     animation: fadeInUp 1s ease-out 0.5s both;
+}
+
+body.dark .main-card {
+    background: var(--card-bg-dark);
+    color: var(--text-dark);
 }
 
 /* Input Section */
@@ -347,12 +397,17 @@ body {
 
 /* History Section */
 .history-section {
-    background: rgba(255, 255, 255, 0.95);
+    background: var(--card-bg-light);
     border-radius: 20px;
     padding: 30px;
     box-shadow: 0 20px 60px rgba(0,0,0,0.1);
     backdrop-filter: blur(15px);
     animation: fadeInUp 1s ease-out 0.7s both;
+}
+
+body.dark .history-section {
+    background: var(--card-bg-dark);
+    color: var(--text-dark);
 }
 
 .history-title {
