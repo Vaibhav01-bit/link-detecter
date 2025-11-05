@@ -3,114 +3,226 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 import numpy as np
+import pandas as pd
+import random
+import math
+from urllib.parse import urlparse
+import re
+import os
+import json
+from database import query_db, init_db
+from flask import Flask
 
-# Generate realistic synthetic training data based on actual features
-np.random.seed(42)
-n_samples = 10000
-n_features = 23  # Based on the feature extraction in backend.py
+# Generate synthetic dataset
+def generate_synthetic_data(n_samples=10000):
+    """
+    Generate synthetic URL data for training.
+    """
+    urls = []
+    labels = []
+    features = []
 
-# Feature names for reference (matching backend):
-# 0: urlLength, 1: domainLength, 2: pathLength, 3: specialChars, 4: digits, 5: letters,
-# 6: subdomainCount, 7: domainTokens, 8: hostnameEntropy, 9: isHttps, 10: hasPort,
-# 11: portNumber, 12: suspiciousKeywords, 13: hasIP, 14: hasPrivateIP, 15: isShortened,
-# 16: pathDepth, 17: hasQueryParams, 18: queryParamsCount, 19: hasRedirect,
-# 20: hasLogin, 21: hasSecure, 22: hasHex, 23: suspiciousTLD, 24: domainAge,
-# 25: hasPunycode, 26: hasLoginForm, 27: alexa_rank
+    # Phishing URLs
+    phishing_patterns = [
+        "http://secure-login-{}.com/update",
+        "https://bankofamerica-login.com/verify",
+        "http://paypal-support.com/confirm",
+        "http://amazon-account.com/security",
+        "http://microsoft365-login.com/suspended",
+        "http://google-account-recovery.com/alert",
+        "http://appleid-support.com/locked",
+        "http://netflix-billing.com/update",
+        "http://ebay-signin.com/verify",
+        "http://irs-gov.com/taxrefund"
+    ]
 
-X = np.zeros((n_samples, n_features))
-y = np.zeros(n_samples, dtype=int)
+    benign_patterns = [
+        "https://www.google.com/search",
+        "https://www.wikipedia.org/",
+        "https://www.github.com/",
+        "https://www.stackoverflow.com/",
+        "https://www.youtube.com/watch",
+        "https://www.amazon.com/",
+        "https://www.facebook.com/",
+        "https://www.twitter.com/",
+        "https://www.linkedin.com/",
+        "https://www.reddit.com/"
+    ]
 
-for i in range(n_samples):
-    is_phishing = np.random.rand() < 0.3  # 30% phishing samples
-    y[i] = int(is_phishing)
+    for _ in range(n_samples // 2):
+        # Phishing
+        pattern = random.choice(phishing_patterns)
+        url = pattern.format(random.randint(1000, 9999))
+        urls.append(url)
+        labels.append(1)  # Phishing
 
-    if is_phishing:
-        # Phishing URL characteristics
-        X[i, 0] = np.random.uniform(50, 200)  # longer URLs
-        X[i, 1] = np.random.uniform(10, 50)   # longer domains
-        X[i, 2] = np.random.uniform(10, 100)  # longer paths
-        X[i, 3] = np.random.uniform(5, 30)    # more special chars
-        X[i, 4] = np.random.uniform(5, 20)    # more digits
-        X[i, 5] = np.random.uniform(20, 100)  # letters
-        X[i, 6] = np.random.uniform(2, 5)     # more subdomains
-        X[i, 7] = np.random.uniform(3, 6)     # more domain tokens
-        X[i, 8] = np.random.uniform(4.0, 5.5) # higher entropy
-        X[i, 9] = np.random.choice([0, 1], p=[0.7, 0.3])  # less HTTPS
-        X[i, 10] = np.random.choice([0, 1], p=[0.8, 0.2])  # some have ports
-        X[i, 11] = np.random.choice([80, 443, 8080, 8443], p=[0.4, 0.4, 0.1, 0.1])
-        X[i, 12] = np.random.uniform(2, 8)    # more suspicious keywords
-        X[i, 13] = np.random.choice([0, 1], p=[0.6, 0.4])  # some use IP
-        X[i, 14] = np.random.choice([0, 1], p=[0.9, 0.1])  # few private IPs
-        X[i, 15] = np.random.choice([0, 1], p=[0.5, 0.5])  # shortened URLs
-        X[i, 16] = np.random.uniform(2, 6)    # deeper paths
-        X[i, 17] = np.random.choice([0, 1], p=[0.3, 0.7])  # more query params
-        X[i, 18] = np.random.uniform(2, 10)   # more query params count
-        X[i, 19] = np.random.choice([0, 1], p=[0.4, 0.6])  # redirects
-        X[i, 20] = np.random.choice([0, 1], p=[0.5, 0.5])  # login paths
-        X[i, 21] = np.random.choice([0, 1], p=[0.6, 0.4])  # secure paths
-        X[i, 22] = np.random.choice([0, 1], p=[0.7, 0.3])  # hex encoding
-    else:
-        # Benign URL characteristics
-        X[i, 0] = np.random.uniform(20, 80)   # shorter URLs
-        X[i, 1] = np.random.uniform(5, 20)    # shorter domains
-        X[i, 2] = np.random.uniform(0, 20)    # shorter paths
-        X[i, 3] = np.random.uniform(0, 10)    # fewer special chars
-        X[i, 4] = np.random.uniform(0, 5)     # fewer digits
-        X[i, 5] = np.random.uniform(10, 50)   # letters
-        X[i, 6] = np.random.uniform(0, 2)     # fewer subdomains
-        X[i, 7] = np.random.uniform(2, 4)     # fewer domain tokens
-        X[i, 8] = np.random.uniform(3.0, 4.5) # lower entropy
-        X[i, 9] = np.random.choice([0, 1], p=[0.1, 0.9])  # mostly HTTPS
-        X[i, 10] = np.random.choice([0, 1], p=[0.95, 0.05])  # few ports
-        X[i, 11] = np.random.choice([80, 443], p=[0.1, 0.9])
-        X[i, 12] = np.random.uniform(0, 2)    # fewer suspicious keywords
-        X[i, 13] = 0  # no IPs
-        X[i, 14] = 0  # no private IPs
-        X[i, 15] = np.random.choice([0, 1], p=[0.9, 0.1])  # few shortened
-        X[i, 16] = np.random.uniform(0, 3)    # shallower paths
-        X[i, 17] = np.random.choice([0, 1], p=[0.6, 0.4])  # fewer query params
-        X[i, 18] = np.random.uniform(0, 3)    # fewer query params count
-        X[i, 19] = np.random.choice([0, 1], p=[0.8, 0.2])  # fewer redirects
-        X[i, 20] = np.random.choice([0, 1], p=[0.9, 0.1])  # few login paths
-        X[i, 21] = np.random.choice([0, 1], p=[0.8, 0.2])  # fewer secure paths
-        X[i, 22] = np.random.choice([0, 1], p=[0.95, 0.05])  # rare hex
+        # Generate features (simplified)
+        parsed = urlparse(url)
+        hostname = parsed.hostname or ''
+        features_dict = {
+            'urlLength': len(url),
+            'domainLength': len(hostname),
+            'pathLength': len(parsed.path),
+            'specialChars': len(re.findall(r'[!@#$%^&*(),.?":{}|<>\-_=+]', url)),
+            'digits': len(re.findall(r'\d', url)),
+            'letters': len(re.findall(r'[a-zA-Z]', url)),
+            'subdomainCount': hostname.count('.') - 1 if hostname.count('.') > 0 else 0,
+            'domainTokens': len(hostname.split('.')),
+            'hostnameEntropy': 3.5 + random.uniform(-0.5, 0.5),  # Higher entropy for phishing
+            'isHttps': 1 if url.startswith('https') else 0,
+            'hasPort': 0,
+            'portNumber': 443 if url.startswith('https') else 80,
+            'suspiciousKeywords': random.randint(1, 3),
+            'hasIP': 0,
+            'hasPrivateIP': 0,
+            'isShortened': 0,
+            'pathDepth': len([p for p in parsed.path.split('/') if p]),
+            'hasQueryParams': 1 if parsed.query else 0,
+            'queryParamsCount': len(parsed.query.split('&')) if parsed.query else 0,
+            'hasRedirect': random.choice([0, 1]),
+            'hasLogin': 1 if 'login' in url.lower() else 0,
+            'hasSecure': 1 if 'secure' in url.lower() else 0,
+            'hasHex': random.choice([0, 1]),
+            'suspiciousTLD': 1 if hostname.endswith(('.tk', '.ml', '.ga')) else 0,
+            'domainAge': random.randint(1, 30),  # New domains
+            'hasPunycode': random.choice([0, 1]),
+            'hasLoginForm': 1,
+            'alexa_rank': random.randint(100000, 1000000)
+        }
+        features.append([features_dict[k] for k in sorted(features_dict.keys())])
 
-# Add remaining features (suspiciousTLD, domainAge, hasPunycode, hasLoginForm, alexa_rank)
-for i in range(n_samples):
-    if y[i] == 1:  # phishing
-        X[i, 23] = np.random.choice([0, 1], p=[0.3, 0.7])  # suspicious TLD
-        X[i, 24] = np.random.uniform(0, 30)   # young domains
-        X[i, 25] = np.random.choice([0, 1], p=[0.8, 0.2])  # punycode
-        X[i, 26] = np.random.choice([0, 1], p=[0.4, 0.6])  # login forms
-        X[i, 27] = np.random.uniform(100000, 1000000)  # low alexa rank
-    else:  # benign
-        X[i, 23] = np.random.choice([0, 1], p=[0.9, 0.1])  # few suspicious TLD
-        X[i, 24] = np.random.uniform(365, 3650)  # older domains
-        X[i, 25] = np.random.choice([0, 1], p=[0.95, 0.05])  # rare punycode
-        X[i, 26] = np.random.choice([0, 1], p=[0.8, 0.2])  # fewer login forms
-        X[i, 27] = np.random.uniform(1, 100000)  # high alexa rank
+    for _ in range(n_samples // 2):
+        # Benign
+        pattern = random.choice(benign_patterns)
+        url = pattern + random.choice(["?q=search", "", "/page/1"])
+        urls.append(url)
+        labels.append(0)  # Benign
 
-# Split data
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        parsed = urlparse(url)
+        hostname = parsed.hostname or ''
+        features_dict = {
+            'urlLength': len(url),
+            'domainLength': len(hostname),
+            'pathLength': len(parsed.path),
+            'specialChars': len(re.findall(r'[!@#$%^&*(),.?":{}|<>\-_=+]', url)),
+            'digits': len(re.findall(r'\d', url)),
+            'letters': len(re.findall(r'[a-zA-Z]', url)),
+            'subdomainCount': hostname.count('.') - 1 if hostname.count('.') > 0 else 0,
+            'domainTokens': len(hostname.split('.')),
+            'hostnameEntropy': 3.0 + random.uniform(-0.5, 0.5),
+            'isHttps': 1,
+            'hasPort': 0,
+            'portNumber': 443,
+            'suspiciousKeywords': 0,
+            'hasIP': 0,
+            'hasPrivateIP': 0,
+            'isShortened': 0,
+            'pathDepth': len([p for p in parsed.path.split('/') if p]),
+            'hasQueryParams': random.choice([0, 1]),
+            'queryParamsCount': len(parsed.query.split('&')) if parsed.query else 0,
+            'hasRedirect': 0,
+            'hasLogin': 0,
+            'hasSecure': 0,
+            'hasHex': 0,
+            'suspiciousTLD': 0,
+            'domainAge': random.randint(365, 3650),
+            'hasPunycode': 0,
+            'hasLoginForm': 0,
+            'alexa_rank': random.randint(1, 10000)
+        }
+        features.append([features_dict[k] for k in sorted(features_dict.keys())])
 
-# Train RandomForest model
-model = RandomForestClassifier(
-    n_estimators=100,
-    max_depth=10,
-    min_samples_split=5,
-    min_samples_leaf=2,
-    random_state=42,
-    n_jobs=-1
-)
-model.fit(X_train, y_train)
+    return urls, labels, features
 
-# Evaluate
-y_pred = model.predict(X_test)
-accuracy = accuracy_score(y_test, y_pred)
-print(f'Model Accuracy: {accuracy:.4f}')
-print('\nClassification Report:')
-print(classification_report(y_test, y_pred, target_names=['Benign', 'Phishing']))
+def load_feedback_data():
+    """
+    Load user feedback from DB for active learning.
+    """
+    app = Flask(__name__)
+    init_db(app)
+    with app.app_context():
+        feedback = query_db('SELECT url, user_label FROM feedback')
+        feedback_data = []
+        for f in feedback:
+            label = 1 if f['user_label'] == 'phishing' else 0
+            # Generate features from URL (simplified, in production use stored features)
+            features = extract_features(f['url'])  # Assume extract_features is available
+            if features:
+                feature_vector = [features[k] for k in sorted(features.keys())]
+                feedback_data.append((f['url'], label, feature_vector))
+        return feedback_data
 
-# Save the model
-joblib.dump(model, 'phishguard_model.pkl')
-print('\nImproved ML model saved as phishguard_model.pkl')
+def augment_with_feedback(synthetic_data, feedback_data, balance_ratio=0.5):
+    """
+    Augment synthetic data with feedback, balancing classes.
+    """
+    urls, labels, features = synthetic_data
+    feedback_urls, feedback_labels, feedback_features = zip(*feedback_data) if feedback_data else ([], [], [])
+
+    # Balance: add feedback to minority class
+    phishing_count = sum(labels)
+    benign_count = len(labels) - phishing_count
+    if phishing_count < benign_count:
+        # Add more phishing from feedback
+        phishing_feedback = [(u, l, f) for u, l, f in zip(feedback_urls, feedback_labels, feedback_features) if l == 1]
+        add_count = min(len(phishing_feedback), int((benign_count - phishing_count) * balance_ratio))
+        for i in range(add_count):
+            urls.append(phishing_feedback[i][0])
+            labels.append(1)
+            features.append(phishing_feedback[i][2])
+    elif benign_count < phishing_count:
+        # Add more benign from feedback
+        benign_feedback = [(u, l, f) for u, l, f in zip(feedback_urls, feedback_labels, feedback_features) if l == 0]
+        add_count = min(len(benign_feedback), int((phishing_count - benign_count) * balance_ratio))
+        for i in range(add_count):
+            urls.append(benign_feedback[i][0])
+            labels.append(0)
+            features.append(benign_feedback[i][2])
+
+    return urls, labels, features
+
+def retrain_model():
+    """
+    Retrain the model with synthetic + feedback data.
+    """
+    # Load feedback
+    feedback_data = load_feedback_data()
+
+    # Generate synthetic
+    synthetic_data = generate_synthetic_data(10000)
+
+    # Augment
+    augmented_data = augment_with_feedback(synthetic_data, feedback_data)
+
+    # Create DataFrame
+    feature_names = [
+        'urlLength', 'domainLength', 'pathLength', 'specialChars', 'digits', 'letters',
+        'subdomainCount', 'domainTokens', 'hostnameEntropy', 'isHttps', 'hasPort', 'portNumber',
+        'suspiciousKeywords', 'hasIP', 'hasPrivateIP', 'isShortened', 'pathDepth', 'hasQueryParams',
+        'queryParamsCount', 'hasRedirect', 'hasLogin', 'hasSecure', 'hasHex', 'suspiciousTLD',
+        'domainAge', 'hasPunycode', 'hasLoginForm', 'alexa_rank'
+    ]
+    df = pd.DataFrame(augmented_data[2], columns=feature_names)
+    df['label'] = augmented_data[1]
+
+    # Split data
+    X = df.drop('label', axis=1)
+    y = df['label']
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Train model
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+
+    # Evaluate
+    y_pred = model.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
+    print(f'Accuracy: {accuracy:.4f}')
+    print(classification_report(y_test, y_pred))
+
+    # Save model
+    joblib.dump(model, 'phishguard_model.pkl')
+    print('Model retrained and saved as phishguard_model.pkl')
+
+if __name__ == '__main__':
+    retrain_model()

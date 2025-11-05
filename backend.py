@@ -6,8 +6,18 @@ from urllib.parse import urlparse, parse_qs
 import ipaddress
 import csv
 import io
-from flask import Flask, request, jsonify, send_file
+import json
+from flask import Flask, request, jsonify, send_file, g
 from flask_cors import CORS
+from bs4 import BeautifulSoup
+
+# Imports for new features
+from database import init_db, close_db, query_db, insert_db
+from threat_feeds import aggregate_feeds
+from clustering import cluster_similar_scans, assign_cluster_to_scan
+from report_generator import generate_takedown_report, submit_report
+from auth import init_auth, api_login, api_logout, api_register, auditor_required, admin_required, get_current_user_role, api_required
+from active_learning import queue_retrain
 
 # Path to your trained model (update as needed)
 MODEL_PATH = os.path.join(os.path.dirname(__file__), 'phishguard_model.pkl')
@@ -73,11 +83,25 @@ def detect_punycode(domain):
 
 def check_login_form(url):
     """
-    Simulates checking for login forms by looking for common patterns.
-    In production, fetch and parse HTML.
+    Enhanced: Fetch HTML and detect credential collection forms without capturing data.
+    Flags forms with password/email inputs as potential credential collectors.
     """
-    # Dummy: check if URL contains login-related keywords
-    return 'login' in url.lower() or 'signin' in url.lower()
+    try:
+        response = requests.get(url, timeout=5, headers={'User-Agent': 'PhishGuard/1.0'})
+        if response.status_code != 200:
+            return False
+        soup = BeautifulSoup(response.text, 'html.parser')
+        forms = soup.find_all('form')
+        for form in forms:
+            inputs = form.find_all('input')
+            has_password = any(inp.get('type') == 'password' for inp in inputs)
+            has_email = any(inp.get('type') == 'email' or 'email' in (inp.get('name') or '').lower() for inp in inputs)
+            if has_password or has_email:
+                return True  # Potential credential collector
+        return False
+    except:
+        # Fallback to keyword check
+        return 'login' in url.lower() or 'signin' in url.lower()
 
 def extract_features(url):
     """
@@ -159,14 +183,23 @@ def extract_features(url):
 # --- Flask App ---
 app = Flask(__name__)
 CORS(app)
+app.secret_key = 'phishguard_secret_key'  # Change in production
 
-# In-memory scan history (replace with DB in production)
-scan_history = []
+# Init DB and auth
+init_db(app)
+init_auth(app)
+
+# Teardown DB
+@app.teardown_appcontext
+def teardown_db(exception):
+    close_db()
 
 @app.route('/api/scan', methods=['POST'])
+@api_required
 def scan_url():
     data = request.get_json()
     url = data.get('url')
+    user_id = getattr(request, 'user_id', None)  # From auth, if implemented
 
     if not url:
         return jsonify({'error': 'URL not provided'}), 400
@@ -175,24 +208,51 @@ def scan_url():
     if not features:
         return jsonify({'error': 'Failed to extract features'}), 500
 
-    # Multi-signal scoring
-    score = calculate_multi_signal_score(features)
-    confidence = calculate_confidence(features, score)
-    reason_codes = get_reason_codes(features, score)
+    # Aggregate feeds
+    feeds_result = aggregate_feeds(url)
+    feed_risk = feeds_result['overall_risk']
 
-    prediction = score > 0.5
-    model_name = 'Multi-Signal Ensemble'
+    # ML prediction if model loaded
+    ml_prob = 0.5
+    if ml_model:
+        vector = [features.get(k, 0) for k in ['urlLength', 'domainLength', 'pathLength', 'specialChars', 'digits', 'letters', 'subdomainCount', 'domainTokens', 'hostnameEntropy', 'isHttps', 'hasPort', 'portNumber', 'suspiciousKeywords', 'hasIP', 'hasPrivateIP', 'isShortened', 'pathDepth', 'hasQueryParams', 'queryParamsCount', 'hasRedirect', 'hasLogin', 'hasSecure', 'hasHex', 'suspiciousTLD', 'domainAge', 'hasPunycode', 'hasLoginForm', 'alexa_rank']]
+        ml_prob = ml_model.predict_proba([vector])[0][1]
+
+    # Ensemble score: weighted avg of heuristic and ML
+    heuristic_score = calculate_multi_signal_score(features)
+    ensemble_score = (heuristic_score * 0.6) + (ml_prob * 0.4) + (feed_risk * 0.1)
+    ensemble_score = min(ensemble_score, 1.0)
+
+    confidence = calculate_confidence(features, ensemble_score)
+    reason_codes = get_reason_codes(features, ensemble_score)
+
+    # Clustering
+    cluster_id = assign_cluster_to_scan(url, features)
+    cluster_summary = None
+    if cluster_id:
+        cluster_data = query_db('SELECT summary FROM clusters WHERE id = ?', (cluster_id,), one=True)
+        cluster_summary = cluster_data['summary'] if cluster_data else None
+
+    prediction = ensemble_score > 0.5
+    model_name = 'Ensemble ML + Feeds'
 
     result = {
         'url': url,
         'phishing': prediction,
-        'score': score,
+        'score': ensemble_score,
         'confidence': confidence,
         'reason_codes': reason_codes,
         'features': features,
-        'model': model_name
+        'model': model_name,
+        'feeds': feeds_result['feeds'],
+        'cluster': {'id': cluster_id, 'summary': cluster_summary} if cluster_id else None,
+        'credentialLeakRisk': features.get('hasLoginForm', False)
     }
-    scan_history.append(result)
+
+    # Save to DB
+    insert_db('INSERT INTO scans (url, phishing, score, confidence, reason_codes, features, model, user_id, cluster_id, feeds_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+              (url, prediction, ensemble_score, confidence, json.dumps(reason_codes), json.dumps(features), model_name, user_id, cluster_id, json.dumps(feeds_result['feeds'])))
+
     return jsonify(result)
 
 def calculate_multi_signal_score(features):
@@ -285,71 +345,184 @@ def get_reason_codes(features, score):
 
     return reasons[:5]  # Limit to top 5 reasons
 
-@app.route('/api/scan/bulk', methods=['POST'])
+@app.route('/api/bulk', methods=['POST'])
+@api_required
 def bulk_scan():
     data = request.get_json()
     urls = data.get('urls', [])
     results = []
     for url in urls:
+        # Reuse scan logic (simplified, without full ensemble for brevity)
         features = extract_features(url)
         if features:
-            score = calculate_multi_signal_score(features)
-            confidence = calculate_confidence(features, score)
-            reason_codes = get_reason_codes(features, score)
-            prediction = score > 0.5
-            model_name = 'Multi-Signal Ensemble'
+            feeds_result = aggregate_feeds(url)
+            feed_risk = feeds_result['overall_risk']
+            heuristic_score = calculate_multi_signal_score(features)
+            ensemble_score = (heuristic_score * 0.6) + (feed_risk * 0.4)  # Simplified
+            confidence = calculate_confidence(features, ensemble_score)
+            reason_codes = get_reason_codes(features, ensemble_score)
+            prediction = ensemble_score > 0.5
+            cluster_id = assign_cluster_to_scan(url, features)
 
             result = {
                 'url': url,
                 'phishing': prediction,
-                'score': score,
+                'score': ensemble_score,
                 'confidence': confidence,
                 'reason_codes': reason_codes,
-                'features': features,
-                'model': model_name
+                'feeds': feeds_result['feeds'],
+                'cluster': cluster_id
             }
+            # Save to DB
+            insert_db('INSERT INTO scans (url, phishing, score, confidence, reason_codes, feeds_data) VALUES (?, ?, ?, ?, ?, ?)',
+                      (url, prediction, ensemble_score, confidence, json.dumps(reason_codes), json.dumps(feeds_result['feeds'])))
         else:
-            result = {
-                'url': url,
-                'error': 'Failed to extract features'
-            }
-        scan_history.append(result)
+            result = {'url': url, 'error': 'Failed to extract features'}
         results.append(result)
     return jsonify({'results': results})
 
+@app.route('/api/history', methods=['GET'])
+@auditor_required
+def get_history():
+    user_role = get_current_user_role()
+    limit = int(request.args.get('limit', 50))
+    scans = query_db('SELECT * FROM scans ORDER BY timestamp DESC LIMIT ?', (limit,))
+    history = []
+    for scan in scans:
+        history.append({
+            'id': scan['id'],
+            'url': scan['url'],
+            'phishing': scan['phishing'],
+            'score': scan['score'],
+            'timestamp': scan['timestamp'],
+            'cluster_id': scan['cluster_id'],
+            'feeds_data': json.loads(scan['feeds_data']) if scan['feeds_data'] else []
+        })
+    return jsonify({'history': history})
+
 @app.route('/api/history/export', methods=['GET'])
+@auditor_required
 def export_history():
+    scans = query_db('SELECT url, phishing, score, timestamp FROM scans')
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=['url', 'phishing', 'model'])
+    writer = csv.DictWriter(output, fieldnames=['url', 'phishing', 'score', 'timestamp'])
     writer.writeheader()
-    for entry in scan_history:
-        writer.writerow({k: entry.get(k, '') for k in ['url', 'phishing', 'model']})
+    for scan in scans:
+        writer.writerow(scan)
     output.seek(0)
     return send_file(io.BytesIO(output.getvalue().encode()), mimetype='text/csv', as_attachment=True, download_name='scan_history.csv')
 
 @app.route('/api/whois', methods=['POST'])
+@auditor_required
 def whois_lookup():
     data = request.get_json()
     url = data.get('url')
-    # Implement real WHOIS lookup here
-    return jsonify({'url': url, 'domain_age': 365})  # Dummy value
+    domain = urlparse(url).netloc
+    whois_info = get_whois_info(domain)  # From report_generator
+    return jsonify(whois_info)
 
-@app.route('/api/google_safe_Browse', methods=['POST'])
-def google_safe_Browse():
+@app.route('/api/google_safe_browsing', methods=['POST'])
+@auditor_required
+def google_safe_browsing():
     data = request.get_json()
     url = data.get('url')
-    # Implement Google Safe Browse API check here
-    return jsonify({'url': url, 'safe': True})  # Dummy value
+    from threat_feeds import fetch_google_safe_browsing
+    result = fetch_google_safe_browsing(url)
+    return jsonify(result)
 
-@app.route('/api/login', methods=['POST'])
-def login():
+@app.route('/api/report/generate', methods=['POST'])
+@auditor_required
+def generate_report():
     data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
-    # Implement real authentication here
-    if username == 'admin' and password == 'password':
-        return jsonify({'success': True, 'token': 'dummy-token'})
-    return jsonify({'success': False}), 401
+    url = data.get('url')
+    export = data.get('export', 'json')  # json or pdf
+    # Fetch scan data from DB
+    scan = query_db('SELECT * FROM scans WHERE url = ? ORDER BY timestamp DESC LIMIT 1', (url,), one=True)
+    if not scan:
+        return jsonify({'error': 'No scan data found'}), 404
+    scan_data = {
+        'url': scan['url'],
+        'score': scan['score'],
+        'reasons': json.loads(scan['reason_codes']),
+        'features': json.loads(scan['features']),
+        'feeds': json.loads(scan['feeds_data']),
+        'timestamp': scan['timestamp']
+    }
+    if export == 'pdf':
+        buffer = generate_takedown_report(scan_data)
+        return send_file(buffer, mimetype='application/pdf', as_attachment=True, download_name=f'report_{url.replace("/", "_")}.pdf')
+    return jsonify(scan_data)
+
+@app.route('/api/feedback', methods=['POST'])
+@auditor_required
+def submit_feedback():
+    data = request.get_json()
+    url = data.get('url')
+    user_label = data.get('label')  # 'phishing' or 'safe'
+    user_id = getattr(request, 'user_id', None)
+    insert_db('INSERT INTO feedback (url, user_label, user_id) VALUES (?, ?, ?)', (url, user_label, user_id))
+    # Queue retrain
+    queue_retrain()
+    return jsonify({'success': True})
+
+# Portal endpoints
+@app.route('/api/portal/login', methods=['POST'])
+def portal_login():
+    return api_login()
+
+@app.route('/api/portal/logout', methods=['POST'])
+def portal_logout():
+    return api_logout()
+
+@app.route('/api/portal/register', methods=['POST'])
+@admin_required
+def portal_register():
+    return api_register()
+
+@app.route('/api/portal/dashboard', methods=['GET'])
+@auditor_required
+def portal_dashboard():
+    user_role = get_current_user_role()
+    total_scans = query_db('SELECT COUNT(*) as count FROM scans', one=True)['count']
+    phishing_count = query_db('SELECT COUNT(*) as count FROM scans WHERE phishing = 1', one=True)['count']
+    avg_score = query_db('SELECT AVG(score) as avg FROM scans', one=True)['avg'] or 0
+    clusters = query_db('SELECT * FROM clusters ORDER BY timestamp DESC LIMIT 5')
+    alerts = query_db('SELECT * FROM alerts ORDER BY triggered_at DESC LIMIT 10')
+    return jsonify({
+        'stats': {'total_scans': total_scans, 'phishing_detected': phishing_count, 'avg_score': avg_score},
+        'clusters': [{'id': c['id'], 'summary': c['summary']} for c in clusters],
+        'alerts': [{'rule': a['rule'], 'message': a['message'], 'triggered_at': a['triggered_at']} for a in alerts],
+        'role': user_role
+    })
+
+@app.route('/api/portal/alerts', methods=['POST'])
+@admin_required
+def set_alert():
+    data = request.get_json()
+    rule = data.get('rule')  # e.g., 'score > 0.7'
+    message = data.get('message')
+    insert_db('INSERT INTO alerts (rule, message) VALUES (?, ?)', (rule, message))
+    return jsonify({'success': True})
+
+@app.route('/api/portal/reports', methods=['GET'])
+@auditor_required
+def list_reports():
+    reports = query_db('SELECT id, url, score, timestamp FROM scans WHERE phishing = 1 ORDER BY timestamp DESC LIMIT 20')
+    return jsonify({'reports': [{'id': r['id'], 'url': r['url'], 'score': r['score'], 'timestamp': r['timestamp']} for r in reports]})
+
+@app.route('/api/portal/export_soc', methods=['GET'])
+@admin_required
+def export_soc():
+    # Bundle recent scans, clusters, alerts as JSON/CSV
+    data = {
+        'scans': query_db('SELECT * FROM scans ORDER BY timestamp DESC LIMIT 100'),
+        'clusters': query_db('SELECT * FROM clusters'),
+        'alerts': query_db('SELECT * FROM alerts')
+    }
+    output = io.StringIO()
+    json.dump(data, output)
+    output.seek(0)
+    return send_file(io.BytesIO(output.getvalue().encode()), mimetype='application/json', as_attachment=True, download_name='soc_export.json')
 
 if __name__ == '__main__':
     app.run(debug=True)
