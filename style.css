@@ -5,6 +5,28 @@
     box-sizing: border-box;
 }
 
+.visually-hidden {
+    position: absolute !important;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0);
+    white-space: nowrap; border: 0;
+}
+
+:focus-visible {
+    outline: 3px solid #4ecdc4;
+    outline-offset: 2px;
+    border-radius: 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    * {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important;
+    }
+}
+
 :root {
     --bg-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 25%, #f093fb 50%, #ff6b9d 75%, #4ecdc4 100%);
     --bg-dark: linear-gradient(135deg, #1a1a2e 0%, #16213e 25%, #0f3460 50%, #533483 75%, #2c3e50 100%);
@@ -136,6 +158,10 @@ body.dark .stat-card {
     letter-spacing: 1px;
 }
 
+body.dark .stat-label {
+    color: #cbd5e0;
+}
+
 /* Main Card */
 .main-card {
     background: var(--card-bg-light);
@@ -236,6 +262,12 @@ body.dark .main-card {
     opacity: 0.6;
     cursor: not-allowed;
     transform: none;
+}
+
+body.dark .feature-card {
+    background: var(--card-bg-dark);
+    color: var(--text-dark);
+    border-color: var(--border-dark);
 }
 
 /* Results Section */
@@ -446,6 +478,11 @@ body.dark .history-section {
 .history-item:hover {
     transform: translateX(8px);
     box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+}
+
+body.dark .history-item {
+    background: var(--card-bg-dark);
+    color: var(--text-dark);
 }
 
 .history-url {

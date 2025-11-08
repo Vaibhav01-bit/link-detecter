@@ -35,6 +35,7 @@ else:
 import math
 import requests
 from urllib.parse import unquote
+import random
 
 def is_private_ip(hostname):
     """
@@ -68,17 +69,20 @@ def get_whois_age(domain):
     In production, use a real WHOIS API.
     """
     # Dummy implementation: random age for simulation
-    return int(math.random() * 3650)  # 0-10 years
+    return int(random.random() * 3650)  # 0-10 years
 
 def detect_punycode(domain):
     """
     Detects if domain uses punycode (internationalized domain names).
+    Returns True if the domain contains xn-- labels or decoding changes the string.
     """
     try:
-        encoded = domain.encode('idna')
-        decoded = encoded.decode('idna')
-        return encoded != decoded.encode('utf-8')
-    except:
+        if 'xn--' in domain:
+            return True
+        encoded = domain.encode('idna').decode('ascii')
+        decoded = encoded.encode('ascii').decode('idna')
+        return decoded != domain
+    except Exception:
         return False
 
 def check_login_form(url):
@@ -195,7 +199,8 @@ def teardown_db(exception):
     close_db()
 
 @app.route('/api/scan', methods=['POST'])
-@api_required
+# Public scanning endpoint to match current frontend usage. Re-enable @api_required if you want auth-only.
+# @api_required
 def scan_url():
     data = request.get_json()
     url = data.get('url')
@@ -224,6 +229,8 @@ def scan_url():
     ensemble_score = min(ensemble_score, 1.0)
 
     confidence = calculate_confidence(features, ensemble_score)
+    # Normalize confidence to 0-1 for API response consistency with frontend expectations
+    confidence_normalized = max(0.0, min(1.0, confidence / 100.0))
     reason_codes = get_reason_codes(features, ensemble_score)
 
     # Clustering
@@ -240,7 +247,7 @@ def scan_url():
         'url': url,
         'phishing': prediction,
         'score': ensemble_score,
-        'confidence': confidence,
+        'confidence': confidence_normalized,
         'reason_codes': reason_codes,
         'features': features,
         'model': model_name,
@@ -360,6 +367,7 @@ def bulk_scan():
             heuristic_score = calculate_multi_signal_score(features)
             ensemble_score = (heuristic_score * 0.6) + (feed_risk * 0.4)  # Simplified
             confidence = calculate_confidence(features, ensemble_score)
+            confidence_normalized = max(0.0, min(1.0, confidence / 100.0))
             reason_codes = get_reason_codes(features, ensemble_score)
             prediction = ensemble_score > 0.5
             cluster_id = assign_cluster_to_scan(url, features)
@@ -368,7 +376,7 @@ def bulk_scan():
                 'url': url,
                 'phishing': prediction,
                 'score': ensemble_score,
-                'confidence': confidence,
+                'confidence': confidence_normalized,
                 'reason_codes': reason_codes,
                 'feeds': feeds_result['feeds'],
                 'cluster': cluster_id

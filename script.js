@@ -30,9 +30,10 @@ class PhishingDetector {
       }
     });
 
-    // Real-time URL validation
+    // Real-time URL validation with debounce
+    const debouncedValidate = this.debounce((value) => this.validateURL(value), 150);
     document.getElementById("urlInput").addEventListener("input", (e) => {
-      this.validateURL(e.target.value);
+      debouncedValidate(e.target.value);
     });
 
     // Theme toggle
@@ -176,16 +177,20 @@ class PhishingDetector {
       });
 
       if (!response.ok) {
-        // If the backend returns an error status, throw a specific error
-        const errorData = await response.json();
-        throw new Error(errorData.error || "Backend returned an error.");
+        // Handle unauthorized specifically
+        if (response.status === 401) {
+          throw new Error("Unauthorized. Please log in to use the scanner.");
+        }
+        let errorData = {};
+        try { errorData = await response.json(); } catch {}
+        throw new Error(errorData.error || `Backend returned an error (status ${response.status}).`);
       }
 
       const data = await response.json();
 
       // Use backend's multi-signal scoring
       const score = data.score;
-      const confidence = data.confidence;
+      const confidence = data.confidence > 1 ? data.confidence / 100 : data.confidence;
       const reasonCodes = data.reason_codes || [];
       const modelPredictions = { [data.model]: score };
 
@@ -564,6 +569,14 @@ class PhishingDetector {
     const themeToggle = document.getElementById("themeToggle");
     const isDark = document.body.classList.contains("dark");
     themeToggle.textContent = isDark ? "☀️" : "🌙";
+  }
+// Simple debounce utility
+  debounce(fn, delay = 200) {
+    let t;
+    return (...args) => {
+      clearTimeout(t);
+      t = setTimeout(() => fn.apply(this, args), delay);
+    };
   }
 }
 
