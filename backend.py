@@ -1,4 +1,4 @@
-# --- ML Model Integration ---
+i# --- ML Model Integration ---
 import joblib
 import os
 import re
@@ -9,15 +9,42 @@ import io
 import json
 from flask import Flask, request, jsonify, send_file, g
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from bs4 import BeautifulSoup
+import structlog
+import sentry_sdk
+from celery import Celery
+import redis
+from datetime import timedelta
+import matplotlib.pyplot as plt
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import shap
+import logging
+import numpy as np
 
 # Imports for new features
 from database import init_db, close_db, query_db, insert_db
-from threat_feeds import aggregate_feeds
-from clustering import cluster_similar_scans, assign_cluster_to_scan
-from report_generator import generate_takedown_report, submit_report
-from auth import init_auth, api_login, api_logout, api_register, auditor_required, admin_required, get_current_user_role, api_required
-from active_learning import queue_retrain
+from threat_feeds import aggregate_feeds_async, aggregate_feeds
+from clustering import cluster_similar_scans_async, assign_cluster_to_scan, visualize_clusters
+from report_generator import generate_takedown_report_async, generate_takedown_report, submit_report, get_whois_info
+from auth import init_jwt, api_login, api_logout, api_register, auditor_required, admin_required, get_current_user_role, api_required, validate_session
+from active_learning import retrain_model_async, submit_feedback
+from config import get_config
+
+config = get_config()
+celery = None
+r = None
+
+def init_async_services():
+    global celery, r
+    if not app.config.get('TESTING'):  # Skip async services in test mode
+        celery = Celery('backend', broker=config.REDIS_URL)
+        r = redis.Redis.from_url(config.REDIS_URL) if config.REDIS_URL else None
+
+logging.basicConfig(level=logging.INFO)
 
 # Path to your trained model (update as needed)
 MODEL_PATH = os.path.join(os.path.dirname(__file__), 'phishguard_model.pkl')
@@ -177,7 +204,7 @@ def extract_features(url):
         features['domainAge'] = get_whois_age(hostname)
         features['hasPunycode'] = detect_punycode(hostname)
         features['hasLoginForm'] = check_login_form(url)
-        features['alexa_rank'] = int(math.random() * 1000000)  # Simulated
+        features['alexa_rank'] = int(random.random() * 1000000)  # Simulated
 
         return features
     except Exception as e:
@@ -191,7 +218,7 @@ app.secret_key = 'phishguard_secret_key'  # Change in production
 
 # Init DB and auth
 init_db(app)
-init_auth(app)
+init_jwt(app)
 
 # Teardown DB
 @app.teardown_appcontext
@@ -202,16 +229,24 @@ def teardown_db(exception):
 # Public scanning endpoint to match current frontend usage. Re-enable @api_required if you want auth-only.
 # @api_required
 def scan_url():
+    app.logger.info('Received scan request')
     data = request.get_json()
+    app.logger.info(f'Request data: {data}')
+    
     url = data.get('url')
     user_id = getattr(request, 'user_id', None)  # From auth, if implemented
 
     if not url:
+        app.logger.error('URL not provided')
         return jsonify({'error': 'URL not provided'}), 400
 
+    app.logger.info(f'Extracting features for URL: {url}')
     features = extract_features(url)
     if not features:
+        app.logger.error('Failed to extract features')
         return jsonify({'error': 'Failed to extract features'}), 500
+    
+    app.logger.info('Features extracted successfully')
 
     # Aggregate feeds
     feeds_result = aggregate_feeds(url)
@@ -219,7 +254,15 @@ def scan_url():
 
     # ML prediction if model loaded
     ml_prob = 0.5
-    if ml_model:
+    if ml_model and isinstance(ml_model, dict) and 'models' in ml_model:
+        vector = [features.get(k, 0) for k in ['urlLength', 'domainLength', 'pathLength', 'specialChars', 'digits', 'letters', 'subdomainCount', 'domainTokens', 'hostnameEntropy', 'isHttps', 'hasPort', 'portNumber', 'suspiciousKeywords', 'hasIP', 'hasPrivateIP', 'isShortened', 'pathDepth', 'hasQueryParams', 'queryParamsCount', 'hasRedirect', 'hasLogin', 'hasSecure', 'hasHex', 'suspiciousTLD', 'domainAge', 'hasPunycode', 'hasLoginForm', 'alexa_rank']]
+        # Ensemble prediction
+        ensemble_probas = np.zeros((1, 2))
+        for name, model in ml_model['models'].items():
+            weight = ml_model['weights'].get(name, 0.33)
+            ensemble_probas += weight * model.predict_proba([vector])
+        ml_prob = ensemble_probas[0][1]
+    elif ml_model and hasattr(ml_model, 'predict_proba'):
         vector = [features.get(k, 0) for k in ['urlLength', 'domainLength', 'pathLength', 'specialChars', 'digits', 'letters', 'subdomainCount', 'domainTokens', 'hostnameEntropy', 'isHttps', 'hasPort', 'portNumber', 'suspiciousKeywords', 'hasIP', 'hasPrivateIP', 'isShortened', 'pathDepth', 'hasQueryParams', 'queryParamsCount', 'hasRedirect', 'hasLogin', 'hasSecure', 'hasHex', 'suspiciousTLD', 'domainAge', 'hasPunycode', 'hasLoginForm', 'alexa_rank']]
         ml_prob = ml_model.predict_proba([vector])[0][1]
 
@@ -245,15 +288,15 @@ def scan_url():
 
     result = {
         'url': url,
-        'phishing': prediction,
-        'score': ensemble_score,
-        'confidence': confidence_normalized,
+        'phishing': bool(prediction),
+        'score': float(ensemble_score),
+        'confidence': float(confidence_normalized),
         'reason_codes': reason_codes,
         'features': features,
         'model': model_name,
         'feeds': feeds_result['feeds'],
         'cluster': {'id': cluster_id, 'summary': cluster_summary} if cluster_id else None,
-        'credentialLeakRisk': features.get('hasLoginForm', False)
+        'credentialLeakRisk': bool(features.get('hasLoginForm', False))
     }
 
     # Save to DB
@@ -355,9 +398,50 @@ def get_reason_codes(features, score):
 @app.route('/api/bulk', methods=['POST'])
 @api_required
 def bulk_scan():
-    data = request.get_json()
-    urls = data.get('urls', [])
-    results = []
+    """Bulk scan endpoint for processing multiple URLs"""
+    try:
+        app.logger.info('Received bulk scan request')
+        data = request.get_json()
+        app.logger.info(f'Request data: {data}')
+        
+        # Check for auth token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header:
+            app.logger.error('No Authorization header present')
+            return jsonify({'error': 'No Authorization header'}), 401
+        
+        if not data:
+            app.logger.error('No data provided')
+            return jsonify({'error': 'No data provided'}), 422
+            
+        urls = data.get('urls', [])
+        app.logger.info(f'URLs to scan: {urls}')
+        
+        if not isinstance(urls, list):
+            app.logger.error(f'URLs must be a list, got {type(urls)}')
+            return jsonify({'error': 'URLs must be a list'}), 422
+            
+        if not urls:
+            app.logger.error('Empty URLs list')
+            return jsonify({'error': 'Empty URLs list'}), 422
+            
+        # Validate URLs
+        for url in urls:
+            if not isinstance(url, str):
+                app.logger.error(f'Invalid URL format: {url} is not a string')
+                return jsonify({'error': f'Invalid URL format: {url} is not a string'}), 422
+            if not url.startswith(('http://', 'https://')):
+                app.logger.error(f'Invalid URL format: {url} must start with http:// or https://')
+                return jsonify({'error': f'Invalid URL format: {url} must start with http:// or https://'}), 422
+        
+        # Validate URLs
+        for url in urls:
+            if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
+                return jsonify({'error': f'Invalid URL format: {url}'}), 422
+        
+        results = []
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
     for url in urls:
         # Reuse scan logic (simplified, without full ensemble for brevity)
         features = extract_features(url)
@@ -374,9 +458,9 @@ def bulk_scan():
 
             result = {
                 'url': url,
-                'phishing': prediction,
-                'score': ensemble_score,
-                'confidence': confidence_normalized,
+                'phishing': bool(prediction),
+                'score': float(ensemble_score),
+                'confidence': float(confidence_normalized),
                 'reason_codes': reason_codes,
                 'feeds': feeds_result['feeds'],
                 'cluster': cluster_id
@@ -464,13 +548,41 @@ def generate_report():
 @app.route('/api/feedback', methods=['POST'])
 @auditor_required
 def submit_feedback():
-    data = request.get_json()
-    url = data.get('url')
-    user_label = data.get('label')  # 'phishing' or 'safe'
-    user_id = getattr(request, 'user_id', None)
-    insert_db('INSERT INTO feedback (url, user_label, user_id) VALUES (?, ?, ?)', (url, user_label, user_id))
-    # Queue retrain
-    queue_retrain()
+    try:
+        app.logger.info('Received feedback request')
+        data = request.get_json()
+        app.logger.info(f'Feedback data: {data}')
+        
+        if not data:
+            app.logger.error('No data provided')
+            return jsonify({'error': 'No data provided'}), 422
+            
+        url = data.get('url')
+        user_label = data.get('label')  # 'phishing' or 'safe'
+        app.logger.info(f'Processing feedback - URL: {url}, Label: {user_label}')
+        
+        # Validate input
+        if not url or not user_label:
+            app.logger.error('Missing URL or label')
+            return jsonify({'error': 'URL and label are required'}), 422
+        if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
+            app.logger.error(f'Invalid URL format: {url}')
+            return jsonify({'error': 'Invalid URL format'}), 422
+        if user_label not in ['phishing', 'safe']:
+            app.logger.error(f'Invalid label: {user_label}')
+            return jsonify({'error': 'Label must be either "phishing" or "safe"'}), 422
+        
+        user_id = getattr(request, 'user_id', None)
+        insert_db('INSERT INTO feedback (url, user_label, user_id) VALUES (?, ?, ?)', (url, user_label, user_id))
+        
+        # Only queue retrain if not in testing mode
+        if not app.config.get('TESTING') and celery:
+            retrain_model_async.delay()
+            
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    retrain_model_async.delay()
     return jsonify({'success': True})
 
 # Portal endpoints
@@ -494,10 +606,11 @@ def portal_dashboard():
     total_scans = query_db('SELECT COUNT(*) as count FROM scans', one=True)['count']
     phishing_count = query_db('SELECT COUNT(*) as count FROM scans WHERE phishing = 1', one=True)['count']
     avg_score = query_db('SELECT AVG(score) as avg FROM scans', one=True)['avg'] or 0
+    ml_models = query_db('SELECT COUNT(*) as count FROM model_versions', one=True)['count']
     clusters = query_db('SELECT * FROM clusters ORDER BY timestamp DESC LIMIT 5')
     alerts = query_db('SELECT * FROM alerts ORDER BY triggered_at DESC LIMIT 10')
     return jsonify({
-        'stats': {'total_scans': total_scans, 'phishing_detected': phishing_count, 'avg_score': avg_score},
+        'stats': {'total_scans': total_scans, 'phishing_detected': phishing_count, 'avg_score': avg_score, 'ml_models': ml_models},
         'clusters': [{'id': c['id'], 'summary': c['summary']} for c in clusters],
         'alerts': [{'rule': a['rule'], 'message': a['message'], 'triggered_at': a['triggered_at']} for a in alerts],
         'role': user_role

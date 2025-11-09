@@ -1,6 +1,14 @@
 import sqlite3
 from flask import g
 import os
+import redis
+from config import get_config
+import logging
+import json
+
+config = get_config()
+r = redis.Redis.from_url(config.REDIS_URL) if config.REDIS_URL else None
+logging.basicConfig(level=logging.INFO)
 
 DATABASE = os.path.join(os.path.dirname(__file__), 'phishguard.db')
 
@@ -76,6 +84,32 @@ def init_db(app):
                 FOREIGN KEY (user_id) REFERENCES users (id)
             )
         ''')
+
+        # Metrics table: for false positives tracking and A/B testing
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id INTEGER,
+                variant TEXT,  -- e.g., 'old_model' or 'new_model' for A/B
+                prediction INTEGER NOT NULL,  -- 0 safe, 1 phishing
+                actual INTEGER,  -- from feedback, 0 or 1 or NULL
+                false_positive BOOLEAN DEFAULT FALSE,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (scan_id) REFERENCES scans (id)
+            )
+        ''')
+
+        # Model versions table: for tracking model retraining
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS model_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT NOT NULL,
+                accuracy REAL NOT NULL,
+                report TEXT,  -- JSON string
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         db.commit()
 
 def close_db(e=None):
@@ -95,3 +129,22 @@ def insert_db(query, args=()):
     cur.execute(query, args)
     db.commit()
     return cur.lastrowid
+
+def cache_scan_result(url, result, ttl=3600):
+    """
+    Cache scan result in Redis for faster lookups.
+    """
+    if r:
+        key = f'scan_{hash(url)}'
+        r.setex(key, ttl, json.dumps(result))
+
+def get_cached_scan(url):
+    """
+    Retrieve cached scan result.
+    """
+    if r:
+        key = f'scan_{hash(url)}'
+        cached = r.get(key)
+        if cached:
+            return json.loads(cached)
+    return None

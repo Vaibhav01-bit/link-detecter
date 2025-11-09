@@ -1,29 +1,24 @@
-from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
-from flask import redirect, url_for, flash, request, jsonify
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, get_jwt
+from flask import request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from database import query_db, insert_db
+from functools import wraps
+from datetime import timedelta
 import os
+import redis
+from config import get_config
+import logging
 
-# Flask-Login setup
-login_manager = LoginManager()
-login_manager.login_view = 'portal_login'
-login_manager.login_message = 'Please log in to access this page.'
+config = get_config()
+r = redis.Redis.from_url(config.REDIS_URL) if config.REDIS_URL else None
+logging.basicConfig(level=logging.INFO)
 
-class User(UserMixin):
-    def __init__(self, id, username, role):
-        self.id = id
-        self.username = username
-        self.role = role
-
-@login_manager.user_loader
-def load_user(user_id):
-    user_data = query_db('SELECT id, username, role FROM users WHERE id = ?', (user_id,), one=True)
-    if user_data:
-        return User(user_data['id'], user_data['username'], user_data['role'])
-    return None
-
-def init_auth(app):
-    login_manager.init_app(app)
+# JWT Setup (init in backend.py: jwt = JWTManager(app))
+def init_jwt(app):
+    app.config['JWT_SECRET_KEY'] = config.JWT_SECRET_KEY or os.getenv('JWT_SECRET_KEY', 'default_secret')
+    app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)
+    app.config['JWT_TOKEN_LOCATION'] = ['headers', 'cookies']
+    return JWTManager(app)
 
 def hash_password(password):
     return generate_password_hash(password)
@@ -40,24 +35,31 @@ def create_user(username, password, role='auditor'):
 def authenticate_user(username, password):
     user_data = query_db('SELECT id, username, password_hash, role FROM users WHERE username = ?', (username,), one=True)
     if user_data and verify_password(password, user_data['password_hash']):
-        user = User(user_data['id'], user_data['username'], user_data['role'])
-        return user
+        return {
+            'id': user_data['id'],
+            'username': user_data['username'],
+            'role': user_data['role']
+        }
     return None
 
-# Role-based decorator
+# Role-based decorators for JWT
 def admin_required(f):
-    @login_required
+    @wraps(f)
+    @jwt_required()
     def decorated_function(*args, **kwargs):
-        if not current_user.is_authenticated or current_user.role != 'admin':
+        claims = get_jwt()
+        if claims.get('role') != 'admin':
             return jsonify({'error': 'Admin access required'}), 403
         return f(*args, **kwargs)
     decorated_function.__name__ = f.__name__
     return decorated_function
 
 def auditor_required(f):
-    @login_required
+    @wraps(f)
+    @jwt_required()
     def decorated_function(*args, **kwargs):
-        if not current_user.is_authenticated or current_user.role not in ['admin', 'auditor']:
+        claims = get_jwt()
+        if claims.get('role') not in ['admin', 'auditor']:
             return jsonify({'error': 'Auditor or admin access required'}), 403
         return f(*args, **kwargs)
     decorated_function.__name__ = f.__name__
@@ -70,13 +72,28 @@ def api_login():
     password = data.get('password')
     user = authenticate_user(username, password)
     if user:
-        login_user(user)
-        return jsonify({'success': True, 'token': f'user_{user.id}_{user.username}', 'role': user.role})
-    return jsonify({'success': False}), 401
+        # Use username as the identity instead of user ID
+        access_token = create_access_token(
+            identity=username,  # Use username as identity
+            additional_claims={'username': username, 'role': user['role']}
+        )
+        # Cache session in Redis
+        if r:
+            try:
+                r.setex(f'session_{username}', 3600, access_token)
+            except:
+                pass  # Ignore Redis errors in tests
+        return jsonify({'success': True, 'access_token': access_token, 'role': user['role']})
+    return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
 
 def api_logout():
-    logout_user()
-    return jsonify({'success': True})
+    try:
+        user_id = get_jwt_identity()
+        if r:
+            r.delete(f'session_{user_id}')
+    except:
+        pass
+    return jsonify({'success': True, 'message': 'Logged out successfully'})
 
 def api_register():
     data = request.get_json()
@@ -89,43 +106,47 @@ def api_register():
         return jsonify({'success': False, 'error': 'User already exists'}), 400
     user_id = create_user(username, password, role)
     if user_id:
-        user = User(user_id, username, role)
-        login_user(user)
-        return jsonify({'success': True, 'role': role})
+        user = {'id': user_id, 'username': username, 'role': role}
+        access_token = create_access_token(identity=user['id'], additional_claims={'username': user['username'], 'role': user['role']})
+        return jsonify({'success': True, 'access_token': access_token, 'role': role})
     return jsonify({'success': False, 'error': 'Registration failed'}), 500
 
-def verify_api_token(token):
-    # Token format: user_{user_id}_{username}
-    parts = token.split('_')
-    if len(parts) == 3 and parts[0] == 'user':
-        try:
-            user_id = int(parts[1])
-            username = parts[2]
-            user_data = query_db('SELECT id, username, role FROM users WHERE id = ?', (user_id,), one=True)
-            if user_data and user_data['username'] == username:
-                return User(user_data['id'], user_data['username'], user_data['role'])
-        except ValueError:
-            pass
-    return None
-
 def api_required(f):
-    from functools import wraps
     @wraps(f)
+    @jwt_required()
     def decorated_function(*args, **kwargs):
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({'error': 'Missing or invalid token'}), 401
-        token = auth_header.split(' ')[1]
-        user = verify_api_token(token)
-        if not user:
-            return jsonify({'error': 'Invalid token'}), 401
-        # Set current_user for compatibility
-        from flask_login import current_user
-        current_user._get_current_object = lambda: user
-        return f(*args, **kwargs)
+        try:
+            # Get the JWT claims to ensure we have a valid token
+            claims = get_jwt()
+            if not claims:
+                return jsonify({'error': 'Invalid token claims'}), 401
+                
+            # Add the user info to the request object for use in the endpoint
+            request.user_id = get_jwt_identity()
+            request.user_role = claims.get('role')
+            
+            return f(*args, **kwargs)
+        except Exception as e:
+            return jsonify({'error': str(e)}), 401
     return decorated_function
 
 def get_current_user_role():
-    if current_user.is_authenticated:
-        return current_user.role
-    return None
+    try:
+        claims = get_jwt()
+        return claims.get('role')
+    except:
+        return None
+
+def validate_session():
+    """
+    Validate JWT token against Redis cache.
+    """
+    try:
+        user_id = get_jwt_identity()
+        if r:
+            cached_token = r.get(f'session_{user_id}')
+            if not cached_token:
+                return False
+        return True
+    except:
+        return False

@@ -16,9 +16,13 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <div class="animated-bg" aria-hidden="true">
+        <canvas id="bgCanvas"></canvas>
+    </div>
     <noscript>
         <div style="background:#fff3cd;color:#856404;padding:10px 15px;text-align:center;">This site requires JavaScript to function properly.</div>
     </noscript>
+    <a class="skip-link" href="#scanner">Skip to scanner</a>
     <div class="container" role="main">
         <div class="header">
             <h1>🛡️ PhishGuard</h1>
@@ -26,7 +30,7 @@
             <button class="theme-toggle" id="themeToggle" aria-label="Toggle dark mode">🌙</button>
         </div>
 
-        <div class="stats-grid">
+        <div class="stats-grid" aria-label="Dashboard statistics">
             <div class="stat-card">
                 <div class="stat-number" id="totalScans">0</div>
                 <div class="stat-label">Total Scans</div>
@@ -36,27 +40,28 @@
                 <div class="stat-label">Phishing Detected</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number">0%</div>
+                <div class="stat-number" id="accuracyRate">0%</div>
                 <div class="stat-label">Accuracy Rate</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number">0</div>
+                <div class="stat-number" id="mlModels">0</div>
                 <div class="stat-label">ML Models</div>
             </div>
         </div>
 
-        <div class="main-card">
+        <div class="main-card" id="scanner">
             <div class="input-section">
                 <h2>🔍 URL Scanner</h2>
-                <p style="margin-bottom: 20px; color: #6c757d;">Enter a URL to analyze for potential phishing threats using our ensemble machine learning models</p>
+                <p class="muted">Enter a URL to analyze for potential phishing threats using our ensemble machine learning models</p>
                 
-                <div class="input-group">
+                <form class="input-group" onsubmit="event.preventDefault(); scanURL();">
                     <label for="urlInput" class="visually-hidden">URL to scan</label>
-                    <input type="url" class="url-input" id="urlInput" placeholder="https://example.com" aria-label="URL to scan" />
-                    <button class="scan-btn" id="scanBtn" type="button" onclick="scanURL()" aria-live="polite">
+                    <input type="url" class="url-input" id="urlInput" placeholder="https://example.com" aria-label="URL to scan" autocomplete="url" inputmode="url" />
+                    <button class="scan-btn" id="scanBtn" type="submit" aria-live="polite">
                         <span id="scanBtnText">🔍 Scan URL</span>
                     </button>
-                </div>
+                </form>
+                <p id="urlHint" class="input-hint" aria-live="polite"></p>
             </div>
 
             <div class="results-section" id="resultsSection" aria-live="polite" aria-atomic="true">
@@ -66,14 +71,12 @@
 
         <div class="history-section">
             <h2 class="history-title">📊 Scan History</h2>
-            <div id="historyContainer">
-                <p style="color: #6c757d; text-align: center;">No scans performed yet</p>
+            <div id="historyContainer" class="history-container" role="list">
+                <p class="empty-state">No scans performed yet</p>
             </div>
         </div>
     </div>
 
     <script src="script.js" defer></script>
-</body>
-</html>
 </body>
 </html>

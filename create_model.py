@@ -1,5 +1,5 @@
 import joblib
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 import numpy as np
@@ -12,6 +12,11 @@ import os
 import json
 from database import query_db, init_db
 from flask import Flask
+import logging
+import xgboost as xgb
+import shap
+
+logging.basicConfig(level=logging.INFO)
 
 # Generate synthetic dataset
 def generate_synthetic_data(n_samples=10000):
@@ -183,7 +188,9 @@ def augment_with_feedback(synthetic_data, feedback_data, balance_ratio=0.5):
 
 def retrain_model():
     """
-    Retrain the model with synthetic + feedback data.
+    Retrain the ensemble model with synthetic + feedback data.
+    Train RF, GB, XGB; save as dict. Add SHAP explainers example.
+    Compute A/B metrics if previous model available.
     """
     # Load feedback
     feedback_data = load_feedback_data()
@@ -194,7 +201,7 @@ def retrain_model():
     # Augment
     augmented_data = augment_with_feedback(synthetic_data, feedback_data)
 
-    # Create DataFrame
+    # Create DataFrame (include feed_risk)
     feature_names = [
         'urlLength', 'domainLength', 'pathLength', 'specialChars', 'digits', 'letters',
         'subdomainCount', 'domainTokens', 'hostnameEntropy', 'isHttps', 'hasPort', 'portNumber',
@@ -210,19 +217,75 @@ def retrain_model():
     y = df['label']
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # Train model
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
+    # Train ensemble models
+    models = {}
+    model_weights = {'random_forest': 0.4, 'gradient_boosting': 0.35, 'xgboost': 0.25}  # From config
 
-    # Evaluate
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
-    print(f'Accuracy: {accuracy:.4f}')
-    print(classification_report(y_test, y_pred))
+    # Random Forest
+    rf = RandomForestClassifier(n_estimators=100, random_state=42)
+    rf.fit(X_train, y_train)
+    models['random_forest'] = rf
 
-    # Save model
-    joblib.dump(model, 'phishguard_model.pkl')
-    print('Model retrained and saved as phishguard_model.pkl')
+    # Gradient Boosting
+    gb = GradientBoostingClassifier(n_estimators=100, random_state=42)
+    gb.fit(X_train, y_train)
+    models['gradient_boosting'] = gb
+
+    # XGBoost
+    xgb_model = xgb.XGBClassifier(n_estimators=100, random_state=42, eval_metric='logloss')
+    xgb_model.fit(X_train, y_train)
+    models['xgboost'] = xgb_model
+
+    # Ensemble prediction (weighted average proba)
+    ensemble_probas = np.zeros((len(X_test), 2))
+    for name, model in models.items():
+        if name == 'xgboost':
+            proba = model.predict_proba(X_test)
+        else:
+            proba = model.predict_proba(X_test)
+        weight = model_weights[name]
+        ensemble_probas += weight * proba
+
+    y_pred_ensemble = np.argmax(ensemble_probas, axis=1)
+    accuracy_ensemble = accuracy_score(y_test, y_pred_ensemble)
+    print(f'Ensemble Accuracy: {accuracy_ensemble:.4f}')
+    print(classification_report(y_test, y_pred_ensemble))
+
+    # SHAP Explainers (save one for demo; compute per prediction in backend)
+    # Example for RF
+    explainer_rf = shap.TreeExplainer(rf)
+    shap_values_rf = explainer_rf.shap_values(X_test.iloc[:10])  # Sample
+    print("SHAP values computed for sample data.")
+
+    # A/B Testing: Compare to previous model if loaded
+    try:
+        prev_ensemble = joblib.load('phishguard_model.pkl')
+        if isinstance(prev_ensemble, dict) and 'models' in prev_ensemble:
+            # Compute ensemble proba for old model
+            old_probas = np.zeros((len(X_test), 2))
+            for name, model in prev_ensemble['models'].items():
+                weight = prev_ensemble['weights'].get(name, 0.33)
+                old_probas += weight * model.predict_proba(X_test.values)  # Use .values for numpy array
+            old_pred = np.argmax(old_probas, axis=1)
+            old_accuracy = accuracy_score(y_test, old_pred)
+            print(f'Previous Ensemble Accuracy: {old_accuracy:.4f}')
+            # Log to metrics (in app context)
+            app = Flask(__name__)
+            with app.app_context():
+                for i, (pred, actual) in enumerate(zip(old_pred, y_test)):
+                    insert_db('INSERT INTO metrics (scan_id, variant, prediction, actual) VALUES (?, ?, ?, ?)',
+                              (i+1, 'old_model', int(pred), int(actual)))  # Mock scan_id
+        else:
+            print("Previous model not compatible for A/B.")
+    except FileNotFoundError:
+        print("No previous model for A/B comparison.")
+    except Exception as e:
+        print(f"A/B comparison failed: {e}")
+
+    # Save ensemble
+    ensemble = {'models': models, 'feature_names': feature_names, 'weights': model_weights}
+    joblib.dump(ensemble, 'phishguard_model.pkl')
+    print('Ensemble model retrained and saved as phishguard_model.pkl')
 
 if __name__ == '__main__':
     retrain_model()

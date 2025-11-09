@@ -1,0 +1,32 @@
+{
+  "name": "link-detecter",
+  "version": "1.0.0",
+  "description": "🛡️ PhishGuard – Advanced Phishing Detection System\r PhishGuard is a web-based phishing detection tool that uses an ensemble of machine learning models to analyze URLs and detect phishing threats.",
+  "main": "script.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Vaibhav01-bit/link-detecter.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Vaibhav01-bit/link-detecter/issues"
+  },
+  "homepage": "https://github.com/Vaibhav01-bit/link-detecter#readme",
+  "devDependencies": {
+    "@babel/core": "^7.28.5",
+    "@babel/preset-env": "^7.28.5",
+    "jest": "^30.2.0",
+    "jest-environment-jsdom": "^30.2.0",
+    "jsdom": "^27.1.0"
+  }
+}

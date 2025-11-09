@@ -1,4 +1,122 @@
  // PhishGuard Frontend Application
+// Background animation (particles) respecting reduced motion
+(function initBackground() {
+  const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const canvas = document.getElementById('bgCanvas');
+  if (!canvas || prefersReduced) return;
+  const ctx = canvas.getContext('2d');
+  let width, height, dpr;
+  let particles = [];
+  const MAX_PARTICLES = 70;
+  let t = 0; // time for waves
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    width = canvas.clientWidth;
+    height = canvas.clientHeight;
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function themeColors() {
+    const isDark = document.body.classList.contains('dark');
+    return isDark
+      ? ['#667eea', '#9f7aea', '#4ecdc4']
+      : ['#ffffff', 'rgba(255,255,255,0.9)', 'rgba(255,255,255,0.7)'];
+  }
+
+  function createParticle() {
+    const [c1, c2, c3] = themeColors();
+    return {
+      x: Math.random() * width,
+      y: Math.random() * height,
+      vx: (Math.random() - 0.5) * 0.35,
+      vy: (Math.random() - 0.5) * 0.35,
+      r: Math.random() * 2 + 0.8,
+      color: [c1, c2, c3][Math.floor(Math.random() * 3)],
+      parallax: Math.random() * 0.6 + 0.7,
+    };
+  }
+
+  function initParticles() {
+    particles = [];
+    for (let i = 0; i < MAX_PARTICLES; i++) particles.push(createParticle());
+  }
+
+  function drawWaves() {
+    const [c1, c2, c3] = themeColors();
+    const waves = [
+      { amp: 6, len: 220, speed: 0.6, color: c1, alpha: 0.08 },
+      { amp: 10, len: 320, speed: 0.4, color: c2, alpha: 0.06 },
+      { amp: 14, len: 440, speed: 0.3, color: c3, alpha: 0.05 },
+    ];
+
+    waves.forEach((w, i) => {
+      ctx.beginPath();
+      const yBase = (height * (0.25 + i * 0.2));
+      for (let x = 0; x <= width; x += 8) {
+        const y = yBase + Math.sin((x + t * (20 * w.speed)) / w.len) * w.amp;
+        if (x === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = w.color;
+      ctx.globalAlpha = w.alpha;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    });
+  }
+
+  function step() {
+    ctx.clearRect(0, 0, width, height);
+
+    // waves background
+    drawWaves();
+
+    // draw particles
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      p.x += p.vx * p.parallax; p.y += p.vy * p.parallax;
+      if (p.x < -10) p.x = width + 10; if (p.x > width + 10) p.x = -10;
+      if (p.y < -10) p.y = height + 10; if (p.y > height + 10) p.y = -10;
+
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fillStyle = p.color;
+      ctx.globalAlpha = 0.85;
+      ctx.fill();
+    }
+
+    // light connections
+    ctx.globalAlpha = 0.08;
+    ctx.lineWidth = 1;
+    for (let i = 0; i < particles.length; i++) {
+      for (let j = i + 1; j < particles.length; j++) {
+        const a = particles[i], b = particles[j];
+        const dx = a.x - b.x, dy = a.y - b.y;
+        const dist2 = dx*dx + dy*dy;
+        if (dist2 < 120*120) {
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.strokeStyle = '#ffffff';
+          ctx.stroke();
+        }
+      }
+    }
+
+    t += 0.5;
+    requestAnimationFrame(step);
+  }
+
+  resize();
+  initParticles();
+  requestAnimationFrame(step);
+  window.addEventListener('resize', () => { resize(); initParticles(); });
+  const obs = new MutationObserver(() => initParticles());
+  obs.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+})();
+
 class PhishingDetector {
   constructor() {
     this.models = {
@@ -34,6 +152,14 @@ class PhishingDetector {
     const debouncedValidate = this.debounce((value) => this.validateURL(value), 150);
     document.getElementById("urlInput").addEventListener("input", (e) => {
       debouncedValidate(e.target.value);
+      const hint = document.getElementById('urlHint');
+      try {
+        if (!e.target.value) { hint.textContent = ''; return; }
+        new URL(e.target.value);
+        hint.textContent = 'Looks like a valid URL.';
+      } catch {
+        hint.textContent = 'Enter a full URL, e.g., https://example.com';
+      }
     });
 
     // Theme toggle
@@ -497,6 +623,7 @@ class PhishingDetector {
     }
 
     const historyHTML = this.scanHistory
+      .slice(0, 10)
       .map((item) => {
         const timeAgo = this.getTimeAgo(new Date(item.timestamp));
         const borderColor =
@@ -535,10 +662,33 @@ class PhishingDetector {
     return `${Math.floor(diffInSeconds / 86400)}d ago`;
   }
 
-  updateStats() {
-    document.getElementById("totalScans").textContent = this.scanHistory.length;
-    document.getElementById("phishingDetected").textContent =
-      this.scanHistory.filter((item) => item.result.type === "phishing").length;
+  async updateStats() {
+    try {
+      const response = await fetch(`${this.apiEndpoint}/portal/dashboard`);
+      if (response.ok) {
+        const data = await response.json();
+        const stats = data.stats;
+        document.getElementById("totalScans").textContent = stats.total_scans || 0;
+        document.getElementById("phishingDetected").textContent = stats.phishing_detected || 0;
+        document.getElementById("accuracyRate").textContent = `${Math.round((stats.avg_score || 0) * 100)}%`;
+        document.getElementById("mlModels").textContent = stats.ml_models || 0;
+      } else {
+        // Fallback to local
+        document.getElementById("totalScans").textContent = this.scanHistory.length;
+        document.getElementById("phishingDetected").textContent =
+          this.scanHistory.filter((item) => item.result.type === "phishing").length;
+        document.getElementById("accuracyRate").textContent = "N/A";
+        document.getElementById("mlModels").textContent = Object.keys(this.models).length;
+      }
+    } catch (error) {
+      console.warn("Failed to fetch dashboard stats:", error);
+      // Fallback
+      document.getElementById("totalScans").textContent = this.scanHistory.length;
+      document.getElementById("phishingDetected").textContent =
+        this.scanHistory.filter((item) => item.result.type === "phishing").length;
+      document.getElementById("accuracyRate").textContent = "N/A";
+      document.getElementById("mlModels").textContent = Object.keys(this.models).length;
+    }
   }
 
   // Method to be called from onclick in history items
